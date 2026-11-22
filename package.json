@@ -1,6 +1,6 @@
 {
   "name": "afro-relay",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Zero-dependency multi-provider SMS & OTP failover router with telco-aware circuit breaking for African messaging APIs (Termii, Sendchamp, Africa's Talking, Twilio, Meta WhatsApp).",
   "author": "Peter Chukwu",
   "license": "MIT",

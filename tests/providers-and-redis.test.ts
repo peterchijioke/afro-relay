@@ -81,4 +81,51 @@ describe("Sendchamp & Twilio providers + RedisBreakerStore", () => {
     expect(twEvent?.status).toBe("FAILED");
     expect(twEvent?.to?.telco).toBe("AIRTEL");
   });
+
+  it("uses node-redis setEx when available and fails open when all circuits are open", async () => {
+    const setExCalls: Array<[string, number, string]> = [];
+    const kv = new Map<string, string>();
+    const nodeRedisClient: RedisLikeClient = {
+      get: async (k) => kv.get(k) ?? null,
+      set: async (k, v) => {
+        kv.set(k, v);
+        return "OK";
+      },
+      setEx: async (k, ttl, v) => {
+        setExCalls.push([k, ttl, v]);
+        kv.set(k, v);
+        return "OK";
+      },
+      del: async (k) => kv.delete(k),
+    };
+
+    vi.spyOn(globalThis, "fetch")
+      // First call fails and opens the only provider's circuit
+      .mockResolvedValueOnce(new Response("down", { status: 500 }))
+      // Second call: circuit is open, but since ALL providers are open, router probes it and recovers!
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: "success", data: { id: "sc-recovered" } }), {
+          status: 200,
+        }),
+      );
+
+    const router = new MessageRouter({
+      providers: [new SendchampProvider({ publicKey: "sc-key", senderName: "MyApp" })],
+      circuitBreaker: {
+        failureThreshold: 1,
+        cooldownMs: 60_000,
+        store: new RedisBreakerStore(nodeRedisClient, { ttlSeconds: 120 }),
+      },
+    });
+
+    const first = await router.send({ to: "08031234567", text: "Hello" });
+    expect(first.ok).toBe(false);
+    expect(setExCalls).toHaveLength(1);
+    expect(setExCalls[0]?.[1]).toBe(120);
+
+    const second = await router.send({ to: "08031234567", text: "Hello again" });
+    expect(second.ok).toBe(true);
+    expect(second.messageId).toBe("sc-recovered");
+    expect(second.skippedProviders).toHaveLength(1);
+  });
 });

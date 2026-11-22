@@ -1,13 +1,17 @@
 import type { BreakerState, CircuitBreakerStore } from "../types.js";
 
 /**
- * Minimal structural Redis client interface compatible with ioredis, node-redis,
+ * Minimal structural Redis client interface compatible with ioredis, node-redis v4,
  * and @upstash/redis without adding any runtime dependency.
  */
 export interface RedisLikeClient {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ...args: unknown[]): Promise<unknown>;
   del(key: string): Promise<unknown>;
+  /** node-redis v4 style */
+  setEx?(key: string, seconds: number, value: string): Promise<unknown>;
+  /** ioredis style */
+  setex?(key: string, seconds: number, value: string): Promise<unknown>;
 }
 
 export interface RedisBreakerStoreOptions {
@@ -50,12 +54,19 @@ export class RedisBreakerStore implements CircuitBreakerStore {
   }
 
   async set(key: string, state: BreakerState): Promise<void> {
+    const k = this.fullKey(key);
     const serialized = JSON.stringify(state);
     if (this.ttlSeconds > 0) {
-      await this.client.set(this.fullKey(key), serialized, "EX", this.ttlSeconds);
-    } else {
-      await this.client.set(this.fullKey(key), serialized);
+      if (typeof this.client.setEx === "function") {
+        await this.client.setEx(k, this.ttlSeconds, serialized);
+        return;
+      }
+      if (typeof this.client.setex === "function") {
+        await this.client.setex(k, this.ttlSeconds, serialized);
+        return;
+      }
     }
+    await this.client.set(k, serialized);
   }
 
   async delete(key: string): Promise<void> {

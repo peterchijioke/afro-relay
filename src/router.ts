@@ -40,12 +40,16 @@ export class MessageRouter {
 
     const attempts: ProviderAttemptResult[] = [];
     const skippedProviders: Array<{ provider: string; reason: string }> = [];
+    let firstSkippedCandidate: { provider: MessagingProvider; channel: Channel } | null = null;
 
     for (const channel of channels) {
       const candidates = this.providers.filter((p) => p.channels.includes(channel));
 
       for (const provider of candidates) {
         if (this.breaker && (await this.breaker.isOpen(provider.name, phone.telco))) {
+          if (!firstSkippedCandidate) {
+            firstSkippedCandidate = { provider, channel };
+          }
           skippedProviders.push({
             provider: provider.name,
             reason: `circuit_open:${provider.name}:${phone.telco}`,
@@ -93,6 +97,37 @@ export class MessageRouter {
         if (this.breaker) {
           await this.breaker.recordFailure(provider.name, phone.telco);
         }
+      }
+    }
+
+    // Fail-open probe: if EVERY candidate was skipped due to open circuits,
+    // probe the first eligible provider as a last resort rather than guaranteeing 100% failure.
+    if (attempts.length === 0 && firstSkippedCandidate) {
+      const { provider, channel } = firstSkippedCandidate;
+      const probe = await provider.send({
+        to: phone,
+        text: input.text,
+        otpCode: input.otpCode,
+        channel,
+        timeoutMs,
+        metadata: input.metadata,
+      });
+      attempts.push(probe);
+      this.onAttempt?.(probe, phone);
+
+      if (probe.ok) {
+        if (this.breaker) {
+          await this.breaker.recordSuccess(provider.name, phone.telco);
+        }
+        return {
+          ok: true,
+          phone,
+          usedProvider: provider.name,
+          usedChannel: channel,
+          messageId: probe.messageId,
+          attempts,
+          skippedProviders,
+        };
       }
     }
 

@@ -73,6 +73,8 @@ SMS providers often return `200 OK` even when the telco drops the message second
 
 ```ts
 app.post("/webhooks/termii", async (req, res) => {
+  // Always verify the provider's webhook signature or IP allowlist first
+  // so untrusted callers cannot spoof FAILED receipts to trip your circuit breaker.
   const event = await router.handleWebhook("termii", req.body, req.headers);
   // event = { provider: "termii", messageId: "...", status: "DND_REJECTED", to: { telco: "MTN", ... } }
   res.sendStatus(200);

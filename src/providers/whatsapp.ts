@@ -13,6 +13,8 @@ export interface WhatsAppConfig {
   accessToken: string;
   /** Approved Meta Authentication template name for OTPs (e.g. "otp_verification") */
   otpTemplateName?: string;
+  /** Set true only if your Meta Auth template includes a copy-code / URL button (default: false) */
+  includeCopyCodeButton?: boolean;
   /** Template language code (default: "en_US") */
   languageCode?: string;
   /** Graph API version (default: "v21.0") */
@@ -45,6 +47,7 @@ export class WhatsAppProvider implements MessagingProvider {
   private readonly phoneNumberId: string;
   private readonly accessToken: string;
   private readonly otpTemplateName?: string;
+  private readonly includeCopyCodeButton: boolean;
   private readonly languageCode: string;
   private readonly apiVersion: string;
 
@@ -54,6 +57,7 @@ export class WhatsAppProvider implements MessagingProvider {
     this.phoneNumberId = config.phoneNumberId;
     this.accessToken = config.accessToken;
     this.otpTemplateName = config.otpTemplateName;
+    this.includeCopyCodeButton = config.includeCopyCodeButton ?? false;
     this.languageCode = config.languageCode ?? "en_US";
     this.apiVersion = config.apiVersion ?? "v21.0";
   }
@@ -61,6 +65,21 @@ export class WhatsAppProvider implements MessagingProvider {
   async send(payload: SendPayload): Promise<ProviderAttemptResult> {
     const start = Date.now();
     const url = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
+
+    const templateComponents: Array<Record<string, unknown>> = [
+      {
+        type: "body",
+        parameters: [{ type: "text", text: payload.otpCode }],
+      },
+    ];
+    if (this.includeCopyCodeButton) {
+      templateComponents.push({
+        type: "button",
+        sub_type: "url",
+        index: "0",
+        parameters: [{ type: "text", text: payload.otpCode }],
+      });
+    }
 
     const body =
       payload.otpCode && this.otpTemplateName
@@ -71,18 +90,7 @@ export class WhatsAppProvider implements MessagingProvider {
             template: {
               name: this.otpTemplateName,
               language: { code: this.languageCode },
-              components: [
-                {
-                  type: "body",
-                  parameters: [{ type: "text", text: payload.otpCode }],
-                },
-                {
-                  type: "button",
-                  sub_type: "url",
-                  index: "0",
-                  parameters: [{ type: "text", text: payload.otpCode }],
-                },
-              ],
+              components: templateComponents,
             },
           }
         : {
