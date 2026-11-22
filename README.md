@@ -1,5 +1,9 @@
 # afro-relay
 
+[![npm version](https://img.shields.io/npm/v/afro-relay.svg)](https://www.npmjs.com/package/afro-relay)
+[![CI](https://github.com/peterchijioke/afro-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/peterchijioke/afro-relay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 Zero-dependency multi-provider **SMS & OTP failover router** with **telco-aware circuit breaking** for African messaging APIs (**Termii**, **Sendchamp**, **Africa's Talking**, **Twilio**, **Meta WhatsApp Cloud API**).
 
 ## Why?
