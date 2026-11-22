@@ -1,0 +1,55 @@
+{
+  "name": "afro-relay",
+  "version": "0.1.0",
+  "description": "Zero-dependency multi-provider SMS & OTP failover router with telco-aware circuit breaking for African messaging APIs (Termii, Africa's Talking, Meta WhatsApp).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "termii",
+    "africas-talking",
+    "whatsapp",
+    "sms",
+    "otp",
+    "failover",
+    "circuit-breaker",
+    "africa",
+    "nigeria",
+    "kenya",
+    "ghana"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
