@@ -42,10 +42,14 @@ export class RedisBreakerStore implements CircuitBreakerStore {
     try {
       const parsed = JSON.parse(raw) as BreakerState;
       if (typeof parsed.failures === "number") {
-        return {
+        const state: BreakerState = {
           failures: parsed.failures,
           openUntil: typeof parsed.openUntil === "number" ? parsed.openUntil : null,
         };
+        if (Array.isArray(parsed.window)) {
+          state.window = parsed.window.filter((v): v is number => v === 0 || v === 1);
+        }
+        return state;
       }
       return null;
     } catch {

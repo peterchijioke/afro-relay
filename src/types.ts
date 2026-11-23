@@ -61,6 +61,11 @@ export interface ProviderAttemptResult {
   errorMessage?: string;
   /** If false (e.g. INVALID_NUMBER), router stops failover immediately */
   retryable: boolean;
+  /**
+   * True when the outcome is ambiguous (e.g. HTTP TIMEOUT) and the gateway may
+   * have already accepted and queued the message.
+   */
+  maybeSent?: boolean;
   latencyMs: number;
   raw?: unknown;
 }
@@ -69,6 +74,12 @@ export interface NormalizedWebhookEvent {
   provider: string;
   messageId: string;
   status: DeliveryStatus;
+  /**
+   * True only for final handset/carrier outcomes (DELIVERED, FAILED, DND_REJECTED, EXPIRED).
+   * False for intermediate gateway/carrier acceptance states (ACCEPTED, PENDING).
+   * Only trigger receipt-driven failover on a terminal miss (`isTerminal && status !== "DELIVERED"`).
+   */
+  isTerminal: boolean;
   to?: NormalizedPhone;
   reason?: string;
   raw: unknown;
@@ -77,6 +88,10 @@ export interface NormalizedWebhookEvent {
 export interface MessagingProvider {
   readonly name: string;
   readonly channels: readonly Channel[];
+  /** Optional sender ID / from address used to scope sender-specific telco drops */
+  readonly senderId?: string;
+  /** True if this provider is configured to bypass DND (e.g. Termii/Sendchamp "dnd" route) */
+  readonly dndCapable?: boolean;
   send(payload: SendPayload): Promise<ProviderAttemptResult>;
   parseWebhook?(
     body: unknown,
@@ -84,9 +99,21 @@ export interface MessagingProvider {
   ): NormalizedWebhookEvent | null;
 }
 
+export type BreakerSignal = "submit" | "delivery";
+
+export interface BreakerScope {
+  provider: string;
+  country?: CountryCode | "*";
+  telco: TelcoName | "*";
+  senderId?: string;
+  signal?: BreakerSignal;
+}
+
 export interface BreakerState {
   failures: number;
   openUntil: number | null;
+  /** Recent outcomes (1 = success, 0 = failure) when sliding-window mode is enabled */
+  window?: number[];
 }
 
 export interface CircuitBreakerStore {
@@ -96,10 +123,18 @@ export interface CircuitBreakerStore {
 }
 
 export interface CircuitBreakerOptions {
-  /** Consecutive failures before tripping the breaker (default: 5) */
+  /** Consecutive failures (or failures in window) before tripping the breaker (default: 5) */
   failureThreshold?: number;
   /** Cooldown duration in milliseconds while breaker stays OPEN (default: 600_000 = 10 min) */
   cooldownMs?: number;
+  /**
+   * Optional sliding window size (number of recent outcomes to track).
+   * When set, the breaker trips once at least `failureThreshold` failures occur
+   * AND the failure rate in the window is >= `failureRateThreshold` (default: 0.5).
+   */
+  windowSize?: number;
+  /** Minimum failure rate (0..1) required to trip when `windowSize` is set (default: 0.5) */
+  failureRateThreshold?: number;
   /** Pluggable store (defaults to in-memory; pass Redis adapter for multi-instance prod) */
   store?: CircuitBreakerStore;
 }
@@ -110,6 +145,13 @@ export interface RouterOptions {
   defaultCountry?: Exclude<CountryCode, "UNKNOWN">;
   /** Per-provider HTTP timeout in milliseconds (default: 5000) */
   timeoutMs?: number;
+  /**
+   * Whether to immediately fail over to the next provider after an HTTP TIMEOUT.
+   * Defaults to `false` to avoid sending duplicate OTPs when the first gateway
+   * accepted the request before timing out. Set `true` to prioritize latency over
+   * duplicate-send risk (ensure the same OTP code is reused across attempts).
+   */
+  failoverOnTimeout?: boolean;
   /** Telco-aware circuit breaker configuration */
   circuitBreaker?: CircuitBreakerOptions | false;
   /** Optional hook for structured logging / metrics */
@@ -124,8 +166,12 @@ export interface SendMessageInput {
   channels?: Channel[];
   /** Override default country for this call */
   country?: Exclude<CountryCode, "UNKNOWN">;
+  /** Override prefix-detected carrier (useful when you have HLR/MNP portability data) */
+  telco?: TelcoName;
   /** Override per-provider timeout for this call */
   timeoutMs?: number;
+  /** Override router-level `failoverOnTimeout` for this call */
+  failoverOnTimeout?: boolean;
   metadata?: Record<string, string>;
 }
 
@@ -137,7 +183,11 @@ export interface SendOTPInput {
   /** Ordered channels to try (default: ["sms", "whatsapp"]) */
   fallbackChannels?: Channel[];
   country?: Exclude<CountryCode, "UNKNOWN">;
+  /** Override prefix-detected carrier (useful when you have HLR/MNP portability data) */
+  telco?: TelcoName;
   timeoutMs?: number;
+  /** Override router-level `failoverOnTimeout` for this call */
+  failoverOnTimeout?: boolean;
   metadata?: Record<string, string>;
 }
 
@@ -147,6 +197,11 @@ export interface RouterSendResult {
   usedProvider?: string;
   usedChannel?: Channel;
   messageId?: string;
+  /**
+   * True if at least one provider attempt timed out in an ambiguous state
+   * (the message may still be delivered by that provider).
+   */
+  maybeSent?: boolean;
   attempts: ProviderAttemptResult[];
   skippedProviders: Array<{ provider: string; reason: string }>;
 }

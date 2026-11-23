@@ -52,8 +52,8 @@ describe("Sendchamp & Twilio providers + RedisBreakerStore", () => {
     expect(result.messageId).toBe("SM1234567890");
     expect(result.attempts[0]?.errorCode).toBe("INSUFFICIENT_BALANCE");
 
-    // Breaker state persisted under Redis key for sendchamp:MTN
-    const stored = kv.get("afro-relay:cb:sendchamp:MTN");
+    // INSUFFICIENT_BALANCE is a provider-global submit error persisted under sendchamp:*:*:submit
+    const stored = kv.get("afro-relay:cb:sendchamp:*:*:submit");
     expect(stored).toBeDefined();
     expect(JSON.parse(stored!).failures).toBe(1);
   });
@@ -70,7 +70,22 @@ describe("Sendchamp & Twilio providers + RedisBreakerStore", () => {
       data: { id: "sc-1", status: "delivered", phone_number: "2348031234567" },
     });
     expect(scEvent?.status).toBe("DELIVERED");
+    expect(scEvent?.isTerminal).toBe(true);
     expect(scEvent?.to?.telco).toBe("MTN");
+
+    // "undelivered" and "delivery failed" must NOT be misclassified as DELIVERED
+    const scUndelivered = await router.handleWebhook("sendchamp", {
+      data: { id: "sc-2", status: "undelivered", phone_number: "2348031234567" },
+    });
+    expect(scUndelivered?.status).toBe("FAILED");
+    expect(scUndelivered?.isTerminal).toBe(true);
+
+    // "sent" is gateway/carrier acceptance (non-terminal), NOT handset delivery
+    const scSent = await router.handleWebhook("sendchamp", {
+      data: { id: "sc-3", status: "sent", phone_number: "2348031234567" },
+    });
+    expect(scSent?.status).toBe("ACCEPTED");
+    expect(scSent?.isTerminal).toBe(false);
 
     const twEvent = await router.handleWebhook("twilio", {
       MessageSid: "SM999",
@@ -79,6 +94,7 @@ describe("Sendchamp & Twilio providers + RedisBreakerStore", () => {
       ErrorMessage: "Carrier violation",
     });
     expect(twEvent?.status).toBe("FAILED");
+    expect(twEvent?.isTerminal).toBe(true);
     expect(twEvent?.to?.telco).toBe("AIRTEL");
   });
 

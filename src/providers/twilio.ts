@@ -49,6 +49,7 @@ function classifyTwilioError(status: number, code?: number): {
 export class TwilioProvider implements MessagingProvider {
   readonly name = "twilio";
   readonly channels = ["sms"] as const;
+  readonly senderId: string;
 
   private readonly accountSid: string;
   private readonly authToken: string;
@@ -62,6 +63,7 @@ export class TwilioProvider implements MessagingProvider {
     this.accountSid = config.accountSid;
     this.authToken = config.authToken;
     this.from = config.from;
+    this.senderId = config.from;
     this.baseUrl = (config.baseUrl ?? "https://api.twilio.com").replace(/\/$/, "");
   }
 
@@ -128,6 +130,7 @@ export class TwilioProvider implements MessagingProvider {
         errorCode: isTimeout ? "TIMEOUT" : "PROVIDER_UNAVAILABLE",
         errorMessage: err instanceof Error ? err.message : String(err),
         retryable: true,
+        ...(isTimeout ? { maybeSent: true } : {}),
         latencyMs,
       };
     }
@@ -142,8 +145,11 @@ export class TwilioProvider implements MessagingProvider {
     const rawStatus = String(data.MessageStatus ?? "").toLowerCase();
     let status: DeliveryStatus = "PENDING";
     if (rawStatus === "delivered") status = "DELIVERED";
-    else if (rawStatus === "sent" || rawStatus === "queued") status = "ACCEPTED";
-    else if (rawStatus === "failed" || rawStatus === "undelivered") status = "FAILED";
+    else if (rawStatus === "sent" || rawStatus === "queued" || rawStatus === "accepted" || rawStatus === "sending") {
+      status = "ACCEPTED";
+    } else if (rawStatus === "failed" || rawStatus === "undelivered" || rawStatus === "canceled") {
+      status = "FAILED";
+    }
 
     let to;
     if (typeof data.To === "string") {
@@ -154,10 +160,13 @@ export class TwilioProvider implements MessagingProvider {
       }
     }
 
+    const isTerminal = status === "DELIVERED" || status === "FAILED";
+
     return {
       provider: this.name,
       messageId,
       status,
+      isTerminal,
       to,
       reason: typeof data.ErrorMessage === "string" ? data.ErrorMessage : rawStatus,
       raw: body,

@@ -148,6 +148,7 @@ export class WhatsAppProvider implements MessagingProvider {
         errorCode: isTimeout ? "TIMEOUT" : "PROVIDER_UNAVAILABLE",
         errorMessage: err instanceof Error ? err.message : String(err),
         retryable: true,
+        ...(isTimeout ? { maybeSent: true } : {}),
         latencyMs,
       };
     }
@@ -188,10 +189,13 @@ export class WhatsAppProvider implements MessagingProvider {
       }
     }
 
+    const isTerminal = status === "DELIVERED" || status === "FAILED";
+
     return {
       provider: this.name,
       messageId: statusObj.id,
       status,
+      isTerminal,
       to,
       reason: statusObj.errors?.[0]?.title ?? statusObj.status,
       raw: body,

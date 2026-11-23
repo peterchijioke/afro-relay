@@ -60,6 +60,8 @@ function classifySendchampError(status: number, message: string): {
 export class SendchampProvider implements MessagingProvider {
   readonly name = "sendchamp";
   readonly channels = ["sms"] as const;
+  readonly senderId: string;
+  readonly dndCapable: boolean;
 
   private readonly publicKey: string;
   private readonly senderName: string;
@@ -71,7 +73,9 @@ export class SendchampProvider implements MessagingProvider {
     if (!config.senderName) throw new Error("SendchampProvider requires senderName");
     this.publicKey = config.publicKey;
     this.senderName = config.senderName;
+    this.senderId = config.senderName;
     this.defaultRoute = config.route;
+    this.dndCapable = config.route === undefined || config.route === "dnd";
     this.baseUrl = (config.baseUrl ?? "https://api.sendchamp.com/api/v1").replace(/\/$/, "");
   }
 
@@ -133,6 +137,7 @@ export class SendchampProvider implements MessagingProvider {
         errorCode: isTimeout ? "TIMEOUT" : "PROVIDER_UNAVAILABLE",
         errorMessage: err instanceof Error ? err.message : String(err),
         retryable: true,
+        ...(isTimeout ? { maybeSent: true } : {}),
         latencyMs,
       };
     }
@@ -155,10 +160,28 @@ export class SendchampProvider implements MessagingProvider {
 
     const rawStatus = String(payload.status ?? "").toLowerCase();
     let status: DeliveryStatus = "PENDING";
-    if (rawStatus.includes("deliver")) status = "DELIVERED";
-    else if (rawStatus.includes("dnd")) status = "DND_REJECTED";
-    else if (rawStatus.includes("fail") || rawStatus.includes("reject")) status = "FAILED";
-    else if (rawStatus.includes("expir")) status = "EXPIRED";
+    if (rawStatus.includes("dnd")) {
+      status = "DND_REJECTED";
+    } else if (
+      rawStatus.includes("undeliver") ||
+      rawStatus.includes("not deliver") ||
+      rawStatus.includes("fail") ||
+      rawStatus.includes("reject")
+    ) {
+      status = "FAILED";
+    } else if (rawStatus.includes("expir")) {
+      status = "EXPIRED";
+    } else if (rawStatus.includes("deliver")) {
+      status = "DELIVERED";
+    } else if (
+      rawStatus.includes("sent") ||
+      rawStatus.includes("submit") ||
+      rawStatus.includes("queue") ||
+      rawStatus.includes("accept") ||
+      rawStatus.includes("buffer")
+    ) {
+      status = "ACCEPTED";
+    }
 
     let to;
     const phoneStr =
@@ -175,10 +198,17 @@ export class SendchampProvider implements MessagingProvider {
       }
     }
 
+    const isTerminal =
+      status === "DELIVERED" ||
+      status === "FAILED" ||
+      status === "DND_REJECTED" ||
+      status === "EXPIRED";
+
     return {
       provider: this.name,
       messageId,
       status,
+      isTerminal,
       to,
       reason: typeof payload.status === "string" ? payload.status : undefined,
       raw: body,

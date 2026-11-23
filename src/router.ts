@@ -1,9 +1,11 @@
 import { TelcoCircuitBreaker } from "./circuit-breaker.js";
 import { normalizePhone } from "./phone.js";
 import type {
+  BreakerScope,
   Channel,
   CountryCode,
   MessagingProvider,
+  NormalizedPhone,
   NormalizedWebhookEvent,
   ProviderAttemptResult,
   RouterOptions,
@@ -16,6 +18,7 @@ export class MessageRouter {
   private readonly providers: MessagingProvider[];
   private readonly defaultCountry: Exclude<CountryCode, "UNKNOWN">;
   private readonly defaultTimeoutMs: number;
+  private readonly failoverOnTimeout: boolean;
   private readonly breaker: TelcoCircuitBreaker | null;
   private readonly onAttempt?: RouterOptions["onAttempt"];
 
@@ -26,6 +29,7 @@ export class MessageRouter {
     this.providers = options.providers;
     this.defaultCountry = options.defaultCountry ?? "NG";
     this.defaultTimeoutMs = options.timeoutMs ?? 5000;
+    this.failoverOnTimeout = options.failoverOnTimeout ?? false;
     this.breaker =
       options.circuitBreaker === false
         ? null
@@ -33,26 +37,90 @@ export class MessageRouter {
     this.onAttempt = options.onAttempt;
   }
 
+  private globalSubmitScope(provider: MessagingProvider): BreakerScope {
+    return {
+      provider: provider.name,
+      country: "*",
+      telco: "*",
+      signal: "submit",
+    };
+  }
+
+  private routeSubmitScope(provider: MessagingProvider, phone: NormalizedPhone): BreakerScope {
+    return {
+      provider: provider.name,
+      country: phone.country,
+      telco: phone.telco,
+      senderId: provider.senderId,
+      signal: "submit",
+    };
+  }
+
+  private routeDeliveryScope(provider: MessagingProvider, phone: NormalizedPhone): BreakerScope {
+    return {
+      provider: provider.name,
+      country: phone.country,
+      telco: phone.telco,
+      senderId: provider.senderId,
+      signal: "delivery",
+    };
+  }
+
+  private async findOpenCircuit(
+    provider: MessagingProvider,
+    phone: NormalizedPhone,
+  ): Promise<BreakerScope | null> {
+    if (!this.breaker) return null;
+    const scopes = [
+      this.globalSubmitScope(provider),
+      this.routeSubmitScope(provider, phone),
+      this.routeDeliveryScope(provider, phone),
+    ];
+    for (const scope of scopes) {
+      if (await this.breaker.isOpen(scope)) {
+        return scope;
+      }
+    }
+    return null;
+  }
+
   async send(input: SendMessageInput): Promise<RouterSendResult> {
-    const phone = normalizePhone(input.to, input.country ?? this.defaultCountry);
+    const normalized = normalizePhone(input.to, input.country ?? this.defaultCountry);
+    const phone: NormalizedPhone = input.telco
+      ? { ...normalized, telco: input.telco }
+      : normalized;
     const channels: Channel[] = input.channels?.length ? input.channels : ["sms"];
     const timeoutMs = input.timeoutMs ?? this.defaultTimeoutMs;
+    const failoverOnTimeout = input.failoverOnTimeout ?? this.failoverOnTimeout;
 
     const attempts: ProviderAttemptResult[] = [];
     const skippedProviders: Array<{ provider: string; reason: string }> = [];
     let firstSkippedCandidate: { provider: MessagingProvider; channel: Channel } | null = null;
+    let maybeSent = false;
 
     for (const channel of channels) {
       const candidates = this.providers.filter((p) => p.channels.includes(channel));
+      let sawDndOnChannel = false;
 
       for (const provider of candidates) {
-        if (this.breaker && (await this.breaker.isOpen(provider.name, phone.telco))) {
+        // After a DND rejection on SMS, skip remaining non-DND SMS routes and
+        // prefer DND-capable SMS providers or escalate to the next channel (e.g. WhatsApp).
+        if (channel === "sms" && sawDndOnChannel && !provider.dndCapable) {
+          skippedProviders.push({
+            provider: provider.name,
+            reason: "dnd_escalated",
+          });
+          continue;
+        }
+
+        const openScope = await this.findOpenCircuit(provider, phone);
+        if (openScope) {
           if (!firstSkippedCandidate) {
             firstSkippedCandidate = { provider, channel };
           }
           skippedProviders.push({
             provider: provider.name,
-            reason: `circuit_open:${provider.name}:${phone.telco}`,
+            reason: `circuit_open:${TelcoCircuitBreaker.makeKey(openScope)}`,
           });
           continue;
         }
@@ -67,11 +135,17 @@ export class MessageRouter {
         });
 
         attempts.push(attempt);
+        if (attempt.maybeSent) {
+          maybeSent = true;
+        }
         this.onAttempt?.(attempt, phone);
 
         if (attempt.ok) {
           if (this.breaker) {
-            await this.breaker.recordSuccess(provider.name, phone.telco);
+            // HTTP 200 OK only proves gateway acceptance, NOT final telco delivery.
+            // Reset submit health only; delivery health is controlled exclusively by DLR webhooks.
+            await this.breaker.recordSuccess(this.globalSubmitScope(provider));
+            await this.breaker.recordSuccess(this.routeSubmitScope(provider, phone));
           }
           return {
             ok: true,
@@ -79,6 +153,7 @@ export class MessageRouter {
             usedProvider: provider.name,
             usedChannel: channel,
             messageId: attempt.messageId,
+            ...(maybeSent ? { maybeSent: true } : {}),
             attempts,
             skippedProviders,
           };
@@ -89,13 +164,40 @@ export class MessageRouter {
           return {
             ok: false,
             phone,
+            ...(maybeSent ? { maybeSent: true } : {}),
             attempts,
             skippedProviders,
           };
         }
 
+        // DND is a recipient/route signal, NOT a telco outage: never trip the health breaker.
+        if (attempt.errorCode === "DND_BLOCKED") {
+          sawDndOnChannel = true;
+          continue;
+        }
+
         if (this.breaker) {
-          await this.breaker.recordFailure(provider.name, phone.telco);
+          if (
+            attempt.errorCode === "AUTH_ERROR" ||
+            attempt.errorCode === "INSUFFICIENT_BALANCE"
+          ) {
+            // Provider-wide account failure: share circuit across all countries & telcos.
+            await this.breaker.recordFailure(this.globalSubmitScope(provider));
+          } else {
+            await this.breaker.recordFailure(this.routeSubmitScope(provider, phone));
+          }
+        }
+
+        // Ambiguous timeout: the first gateway may have already queued the SMS.
+        // Stop by default to avoid putting a duplicate OTP on the wire unless opted in.
+        if (attempt.errorCode === "TIMEOUT" && !failoverOnTimeout) {
+          return {
+            ok: false,
+            phone,
+            maybeSent: true,
+            attempts,
+            skippedProviders,
+          };
         }
       }
     }
@@ -113,11 +215,15 @@ export class MessageRouter {
         metadata: input.metadata,
       });
       attempts.push(probe);
+      if (probe.maybeSent) {
+        maybeSent = true;
+      }
       this.onAttempt?.(probe, phone);
 
       if (probe.ok) {
         if (this.breaker) {
-          await this.breaker.recordSuccess(provider.name, phone.telco);
+          await this.breaker.recordSuccess(this.globalSubmitScope(provider));
+          await this.breaker.recordSuccess(this.routeSubmitScope(provider, phone));
         }
         return {
           ok: true,
@@ -125,6 +231,7 @@ export class MessageRouter {
           usedProvider: provider.name,
           usedChannel: channel,
           messageId: probe.messageId,
+          ...(maybeSent ? { maybeSent: true } : {}),
           attempts,
           skippedProviders,
         };
@@ -134,6 +241,7 @@ export class MessageRouter {
     return {
       ok: false,
       phone,
+      ...(maybeSent ? { maybeSent: true } : {}),
       attempts,
       skippedProviders,
     };
@@ -150,14 +258,17 @@ export class MessageRouter {
       otpCode: input.code,
       channels: input.fallbackChannels ?? ["sms", "whatsapp"],
       country: input.country,
+      telco: input.telco,
       timeoutMs: input.timeoutMs,
+      failoverOnTimeout: input.failoverOnTimeout,
       metadata: input.metadata,
     });
   }
 
   /**
    * Parses a delivery receipt webhook from a registered provider and feeds
-   * FAILED / DND_REJECTED receipts back into the telco-aware circuit breaker.
+   * final FAILED / EXPIRED receipts into the delivery circuit breaker.
+   * DND_REJECTED receipts are returned without tripping the telco outage breaker.
    */
   async handleWebhook(
     providerName: string,
@@ -171,10 +282,11 @@ export class MessageRouter {
     if (!event) return null;
 
     if (this.breaker && event.to) {
+      const deliveryScope = this.routeDeliveryScope(provider, event.to);
       if (event.status === "DELIVERED") {
-        await this.breaker.recordSuccess(provider.name, event.to.telco);
-      } else if (event.status === "FAILED" || event.status === "DND_REJECTED") {
-        await this.breaker.recordFailure(provider.name, event.to.telco);
+        await this.breaker.recordSuccess(deliveryScope);
+      } else if (event.status === "FAILED" || event.status === "EXPIRED") {
+        await this.breaker.recordFailure(deliveryScope);
       }
     }
 

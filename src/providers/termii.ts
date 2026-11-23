@@ -56,9 +56,10 @@ function classifyTermiiError(status: number, message: string): {
 export class TermiiProvider implements MessagingProvider {
   readonly name = "termii";
   readonly channels = ["sms"] as const;
+  readonly senderId: string;
+  readonly dndCapable: boolean;
 
   private readonly apiKey: string;
-  private readonly senderId: string;
   private readonly defaultChannel?: "dnd" | "generic" | "whatsapp";
   private readonly baseUrl: string;
 
@@ -68,6 +69,7 @@ export class TermiiProvider implements MessagingProvider {
     this.apiKey = config.apiKey;
     this.senderId = config.senderId;
     this.defaultChannel = config.channel;
+    this.dndCapable = config.channel === undefined || config.channel === "dnd";
     this.baseUrl = (config.baseUrl ?? "https://v3.api.termii.com").replace(/\/$/, "");
   }
 
@@ -128,6 +130,7 @@ export class TermiiProvider implements MessagingProvider {
         errorCode: isTimeout ? "TIMEOUT" : "PROVIDER_UNAVAILABLE",
         errorMessage: err instanceof Error ? err.message : String(err),
         retryable: true,
+        ...(isTimeout ? { maybeSent: true } : {}),
         latencyMs,
       };
     }
@@ -147,10 +150,28 @@ export class TermiiProvider implements MessagingProvider {
 
     const rawStatus = String(data.status ?? "").toLowerCase();
     let status: DeliveryStatus = "PENDING";
-    if (rawStatus.includes("deliver")) status = "DELIVERED";
-    else if (rawStatus.includes("dnd")) status = "DND_REJECTED";
-    else if (rawStatus.includes("reject") || rawStatus.includes("fail")) status = "FAILED";
-    else if (rawStatus.includes("expir")) status = "EXPIRED";
+    if (rawStatus.includes("dnd")) {
+      status = "DND_REJECTED";
+    } else if (
+      rawStatus.includes("undeliver") ||
+      rawStatus.includes("not deliver") ||
+      rawStatus.includes("reject") ||
+      rawStatus.includes("fail")
+    ) {
+      status = "FAILED";
+    } else if (rawStatus.includes("expir")) {
+      status = "EXPIRED";
+    } else if (rawStatus.includes("deliver")) {
+      status = "DELIVERED";
+    } else if (
+      rawStatus.includes("sent") ||
+      rawStatus.includes("submit") ||
+      rawStatus.includes("queue") ||
+      rawStatus.includes("accept") ||
+      rawStatus.includes("buffer")
+    ) {
+      status = "ACCEPTED";
+    }
 
     let to;
     if (typeof data.receiver === "string") {
@@ -161,10 +182,17 @@ export class TermiiProvider implements MessagingProvider {
       }
     }
 
+    const isTerminal =
+      status === "DELIVERED" ||
+      status === "FAILED" ||
+      status === "DND_REJECTED" ||
+      status === "EXPIRED";
+
     return {
       provider: this.name,
       messageId,
       status,
+      isTerminal,
       to,
       reason: typeof data.status === "string" ? data.status : undefined,
       raw: body,

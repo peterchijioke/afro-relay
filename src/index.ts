@@ -14,6 +14,8 @@ export type { TwilioConfig } from "./providers/twilio.js";
 export { WhatsAppProvider } from "./providers/whatsapp.js";
 export type { WhatsAppConfig } from "./providers/whatsapp.js";
 export type {
+  BreakerScope,
+  BreakerSignal,
   BreakerState,
   Channel,
   CircuitBreakerOptions,

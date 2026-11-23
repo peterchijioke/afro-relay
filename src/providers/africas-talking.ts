@@ -47,6 +47,7 @@ function classifyATStatusCode(code: number): {
 export class AfricasTalkingProvider implements MessagingProvider {
   readonly name = "africas-talking";
   readonly channels = ["sms"] as const;
+  readonly senderId?: string;
 
   private readonly apiKey: string;
   private readonly username: string;
@@ -59,6 +60,7 @@ export class AfricasTalkingProvider implements MessagingProvider {
     this.apiKey = config.apiKey;
     this.username = config.username;
     this.from = config.from;
+    this.senderId = config.from;
     this.endpoint = config.sandbox
       ? "https://api.sandbox.africastalking.com/version1/messaging"
       : "https://api.africastalking.com/version1/messaging";
@@ -137,6 +139,7 @@ export class AfricasTalkingProvider implements MessagingProvider {
         errorCode: isTimeout ? "TIMEOUT" : "PROVIDER_UNAVAILABLE",
         errorMessage: err instanceof Error ? err.message : String(err),
         retryable: true,
+        ...(isTimeout ? { maybeSent: true } : {}),
         latencyMs,
       };
     }
@@ -152,11 +155,21 @@ export class AfricasTalkingProvider implements MessagingProvider {
     const failureReason = String(data.failureReason ?? "");
     let status: DeliveryStatus = "PENDING";
 
-    if (rawStatus === "success" || rawStatus === "delivered") status = "DELIVERED";
-    else if (failureReason.toLowerCase().includes("blacklist") || failureReason.toLowerCase().includes("dnd")) {
+    if (failureReason.toLowerCase().includes("blacklist") || failureReason.toLowerCase().includes("dnd")) {
       status = "DND_REJECTED";
-    } else if (rawStatus === "failed" || rawStatus === "rejected") {
+    } else if (rawStatus === "failed" || rawStatus === "rejected" || rawStatus === "undelivered") {
       status = "FAILED";
+    } else if (rawStatus === "expired") {
+      status = "EXPIRED";
+    } else if (rawStatus === "success" || rawStatus === "delivered") {
+      status = "DELIVERED";
+    } else if (
+      rawStatus === "sent" ||
+      rawStatus === "submitted" ||
+      rawStatus === "buffered" ||
+      rawStatus === "queued"
+    ) {
+      status = "ACCEPTED";
     }
 
     let to;
@@ -168,10 +181,17 @@ export class AfricasTalkingProvider implements MessagingProvider {
       }
     }
 
+    const isTerminal =
+      status === "DELIVERED" ||
+      status === "FAILED" ||
+      status === "DND_REJECTED" ||
+      status === "EXPIRED";
+
     return {
       provider: this.name,
       messageId,
       status,
+      isTerminal,
       to,
       reason: failureReason || (typeof data.status === "string" ? data.status : undefined),
       raw: body,
